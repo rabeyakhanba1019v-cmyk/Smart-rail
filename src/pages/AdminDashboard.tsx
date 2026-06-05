@@ -9,17 +9,26 @@ import DashboardLayout from '../components/layout/DashboardLayout';
 import StatCard from '../components/ui/StatCard';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
 import { useToast } from '../components/ui/Toast';
-import { addWalletBalance } from '../hooks/useWallet';
 import { supabaseAdmin } from '../lib/supabase';
 
-// Force deduct for fraud — no balance check, floors at 0
+const adminDb = () => supabaseAdmin || supabase;
+
+// Refund buyer: adds balance back, corrects total_spent — uses admin client to bypass RLS
+async function adminRefundWallet(userId: string, amount: number) {
+  const { data: current } = await adminDb().from('wallets').select('balance, total_spent').eq('user_id', userId).single();
+  await adminDb().from('wallets').update({
+    balance: (current?.balance ?? 0) + amount,
+    total_spent: Math.max(0, (current?.total_spent ?? 0) - amount),
+    updated_at: new Date().toISOString(),
+  }).eq('user_id', userId);
+}
+
+// Claw back seller: deducts balance and total_earned — no balance check, floors at 0
 async function forceDeductWallet(userId: string, amount: number) {
-  const { data: current } = await supabase
-    .from('wallets').select('balance, total_spent').eq('user_id', userId).single();
-  const newBalance = Math.max(0, (current?.balance ?? 0) - amount);
-  await supabase.from('wallets').update({
-    balance: newBalance,
-    total_spent: (current?.total_spent ?? 0) + amount,
+  const { data: current } = await adminDb().from('wallets').select('balance, total_earned').eq('user_id', userId).single();
+  await adminDb().from('wallets').update({
+    balance: Math.max(0, (current?.balance ?? 0) - amount),
+    total_earned: Math.max(0, (current?.total_earned ?? 0) - amount),
     updated_at: new Date().toISOString(),
   }).eq('user_id', userId);
 }
@@ -42,10 +51,11 @@ async function deductTrustPoints(userId: string, points: number) {
 
     if (soldTickets?.length) {
       for (const t of soldTickets) {
-        const { data: bw } = await supabaseAdmin.from('wallets').select('balance').eq('user_id', t.buyer_id).single();
+        const { data: bw } = await supabaseAdmin.from('wallets').select('balance, total_spent').eq('user_id', t.buyer_id).single();
         if (bw) {
           await supabaseAdmin.from('wallets').update({
             balance: bw.balance + t.price,
+            total_spent: Math.max(0, (bw.total_spent ?? 0) - t.price),
             updated_at: new Date().toISOString(),
           }).eq('user_id', t.buyer_id);
         }
@@ -81,7 +91,79 @@ export default function AdminDashboard() {
   const [expandedReport, setExpandedReport] = useState<string | null>(null);
   const [adminNotes, setAdminNotes] = useState<Record<string, string>>({});
   const [processing, setProcessing] = useState<string | null>(null);
+  const [fixingRefunds, setFixingRefunds] = useState(false);
+  const [fixResult, setFixResult] = useState<{ fixed: number; skipped: number } | null>(null);
   const { toast } = useToast();
+
+  const handleFixPendingRefunds = async () => {
+    setFixingRefunds(true);
+    setFixResult(null);
+    let fixed = 0;
+    let skipped = 0;
+
+    try {
+      // All flagged tickets that have a buyer (purchase happened)
+      const { data: flaggedTickets } = await adminDb()
+        .from('tickets')
+        .select('id, buyer_id, user_id, price, train_name')
+        .eq('status', 'flagged')
+        .not('buyer_id', 'is', null);
+
+      if (!flaggedTickets?.length) {
+        setFixResult({ fixed: 0, skipped: 0 });
+        setFixingRefunds(false);
+        return;
+      }
+
+      for (const ticket of flaggedTickets) {
+        // Check if refund notification was already sent to this buyer for this ticket
+        const { data: existing } = await adminDb()
+          .from('notifications')
+          .select('id')
+          .eq('user_id', ticket.buyer_id)
+          .eq('title', 'Payment Refunded (Fraud Detected)')
+          .ilike('message', `%${ticket.train_name}%`)
+          .maybeSingle();
+
+        if (existing) {
+          skipped++;
+          continue;
+        }
+
+        // Process refund
+        await adminRefundWallet(ticket.buyer_id, ticket.price);
+        await forceDeductWallet(ticket.user_id, ticket.price);
+        await adminDb().from('notifications').insert([
+          {
+            user_id: ticket.buyer_id,
+            title: 'Payment Refunded (Fraud Detected)',
+            message: `You have been refunded ${formatPrice(ticket.price)} for ticket "${ticket.train_name}" because it was confirmed as fraud.`,
+            type: 'success',
+            link: '/dashboard',
+          },
+          {
+            user_id: ticket.user_id,
+            title: 'Funds Clawed Back (Fraud Confirmed)',
+            message: `The payment for your listing "${ticket.train_name}" has been reversed because it was confirmed as fraudulent.`,
+            type: 'fraud',
+            link: '/dashboard',
+          },
+        ]);
+        fixed++;
+      }
+
+      setFixResult({ fixed, skipped });
+      if (fixed > 0) {
+        toast('success', 'Refunds Processed', `${fixed} wallet refund${fixed !== 1 ? 's' : ''} applied successfully.`);
+      } else {
+        toast('info', 'Nothing to Fix', 'All flagged tickets were already refunded.');
+      }
+    } catch (err: unknown) {
+      toast('error', 'Fix Failed', err instanceof Error ? err.message : 'Unknown error');
+    }
+
+    setFixingRefunds(false);
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -173,6 +255,13 @@ export default function AdminDashboard() {
     if (verdict === 'confirmed_fraud') {
       // Flag the reported ticket if exists
       if (report.reported_ticket_id) {
+        // Fetch ticket data BEFORE flagging — status changes to 'flagged' after this
+        const { data: ticketData } = await supabase
+          .from('tickets')
+          .select('buyer_id, user_id, price')
+          .eq('id', report.reported_ticket_id)
+          .maybeSingle();
+
         await supabase.from('tickets').update({ status: 'flagged' }).eq('id', report.reported_ticket_id);
 
         // --- AUTOMATED REFUND SYSTEM ---
@@ -185,7 +274,7 @@ export default function AdminDashboard() {
 
         if (relatedOrders && relatedOrders.length > 0) {
           for (const order of relatedOrders) {
-            await addWalletBalance(order.buyer_id, order.amount);
+            await adminRefundWallet(order.buyer_id, order.amount);
             await forceDeductWallet(order.seller_id, order.amount);
             await supabase.from('orders').update({
               payment_status: 'refunded',
@@ -209,35 +298,30 @@ export default function AdminDashboard() {
               }
             ]);
           }
-        } else {
+        } else if (ticketData?.buyer_id) {
           // 2. Fallback: ticket sold via purchase request (no order record)
-          const { data: soldTicket } = await supabase
-            .from('tickets')
-            .select('buyer_id, user_id, price')
-            .eq('id', report.reported_ticket_id)
-            .eq('status', 'sold')
-            .maybeSingle();
-
-          if (soldTicket?.buyer_id) {
-            await addWalletBalance(soldTicket.buyer_id, soldTicket.price);
-            await forceDeductWallet(soldTicket.user_id, soldTicket.price);
-            await supabase.from('notifications').insert([
-              {
-                user_id: soldTicket.buyer_id,
-                title: 'Payment Refunded (Fraud Detected)',
-                message: `You have been refunded ${formatPrice(soldTicket.price)} for ticket ${report.reported_ticket?.train_name || 'Railway Ticket'} because it was confirmed as fraud.`,
-                type: 'success',
-                link: '/dashboard'
-              },
-              {
-                user_id: soldTicket.user_id,
-                title: 'Funds Clawed Back (Fraud Confirmed)',
-                message: `The payment for your listing "${report.reported_ticket?.train_name}" has been reversed because it was confirmed as fraudulent.`,
-                type: 'fraud',
-                link: '/dashboard'
-              }
-            ]);
-          }
+          // Use pre-fetched ticketData — status is now 'flagged' so we can't query by status
+          await adminRefundWallet(ticketData.buyer_id, ticketData.price);
+          await forceDeductWallet(ticketData.user_id, ticketData.price);
+          await supabase.from('notifications').insert([
+            {
+              user_id: ticketData.buyer_id,
+              title: 'Payment Refunded (Fraud Detected)',
+              message: `You have been refunded ${formatPrice(ticketData.price)} for ticket ${report.reported_ticket?.train_name || 'Railway Ticket'} because it was confirmed as fraud.`,
+              type: 'success',
+              link: '/dashboard'
+            },
+            {
+              user_id: ticketData.user_id,
+              title: 'Funds Clawed Back (Fraud Confirmed)',
+              message: `The payment for your listing "${report.reported_ticket?.train_name}" has been reversed because it was confirmed as fraudulent.`,
+              type: 'fraud',
+              link: '/dashboard'
+            }
+          ]);
+        } else {
+          // 3. No buyer found — ticket was never purchased, just flag it (no wallet action needed)
+          void 0;
         }
       }
       // Notify the reporter that their report was confirmed
@@ -339,7 +423,42 @@ export default function AdminDashboard() {
 
         {/* Overview tab */}
         {activeTab === 'overview' && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+
+          {/* Data Repair — fix wallets for already-flagged tickets */}
+          <div className="bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border border-yellow-500/20 rounded-xl p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={18} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-white font-semibold text-sm">Fix Pending Fraud Refunds</p>
+                  <p className="text-gray-400 text-xs mt-0.5 leading-relaxed">
+                    Finds all flagged tickets whose buyers were never refunded and corrects their wallet balances now.
+                  </p>
+                  {fixResult && (
+                    <p className={`text-xs mt-1.5 font-medium ${fixResult.fixed > 0 ? 'text-emerald-400' : 'text-gray-400'}`}>
+                      {fixResult.fixed > 0
+                        ? `✓ ${fixResult.fixed} refund${fixResult.fixed !== 1 ? 's' : ''} applied, ${fixResult.skipped} already done`
+                        : `All ${fixResult.skipped} flagged ticket${fixResult.skipped !== 1 ? 's' : ''} already refunded`}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={handleFixPendingRefunds}
+                disabled={fixingRefunds}
+                className="flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/30 text-yellow-400 rounded-xl text-sm font-bold transition-all disabled:opacity-50"
+              >
+                {fixingRefunds ? (
+                  <><div className="w-4 h-4 border-2 border-yellow-400/30 border-t-yellow-400 rounded-full animate-spin" /> Running…</>
+                ) : (
+                  <><Shield size={14} /> Run Fix</>
+                )}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-gray-900/60 border border-white/5 rounded-xl">
               <div className="flex items-center justify-between p-5 border-b border-white/5">
                 <h2 className="text-white font-semibold">Platform Health</h2>
@@ -380,6 +499,7 @@ export default function AdminDashboard() {
                 </div>
               </div>
             </div>
+          </div>
           </motion.div>
         )}
 

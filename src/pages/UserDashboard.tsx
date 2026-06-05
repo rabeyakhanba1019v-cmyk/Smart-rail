@@ -116,15 +116,6 @@ export default function UserDashboard() {
 
   const activeListings = tickets.filter(t => t.status === 'active').length;
   const soldTickets = tickets.filter(t => t.status === 'sold').length;
-  const totalEarnings = tickets.reduce((sum, t) => {
-    // For legacy tickets or manual sales, if status is 'sold' but quantity_available 
-    // is still equal to quantity, treat the whole quantity as sold.
-    let soldCount = t.quantity - t.quantity_available;
-    if (t.status === 'sold' && soldCount === 0 && t.quantity > 0) {
-      soldCount = t.quantity;
-    }
-    return sum + (t.price * soldCount);
-  }, 0);
   const purchasesCount = purchasedTickets.length;
 
   const notifIconMap: Record<string, React.ReactNode> = {
@@ -149,11 +140,10 @@ export default function UserDashboard() {
         </motion.div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard label="Active Listings" value={activeListings} icon={<Ticket size={20} />} color="cyan" />
           <StatCard label="Tickets Sold" value={soldTickets} icon={<CheckCircle size={20} />} color="emerald" />
           <StatCard label="Purchases" value={purchasesCount} icon={<ShoppingBag size={20} />} color="yellow" />
-          <StatCard label="Earnings" value={formatPrice(totalEarnings)} icon={<TrendingUp size={20} />} color="emerald" />
           <div className="relative group">
             <StatCard label="Wallet Balance" value={formatPrice(wallet?.balance || 0)} icon={<DollarSign size={20} />} color="cyan" />
             <button 
@@ -377,6 +367,72 @@ export default function UserDashboard() {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </motion.div>
+
+        {/* My Purchases */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.22 }}
+          className="bg-gray-900/60 border border-white/5 rounded-xl"
+        >
+          <div className="flex items-center justify-between p-5 border-b border-white/5">
+            <div className="flex items-center gap-2">
+              <h2 className="text-white font-semibold">My Purchases</h2>
+              <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">{purchasedTickets.length} total</span>
+            </div>
+            <Link to="/marketplace" className="text-cyan-400 text-sm hover:text-cyan-300 flex items-center gap-1">
+              <ShoppingBag size={14} /> Buy More
+            </Link>
+          </div>
+          {purchasedLoading ? (
+            <LoadingSpinner size="sm" />
+          ) : purchasedTickets.length === 0 ? (
+            <div className="p-8 text-center">
+              <ShoppingBag size={32} className="text-gray-700 mx-auto mb-3" />
+              <p className="text-gray-500 text-sm">No purchased tickets yet</p>
+              <Link to="/marketplace" className="mt-3 inline-flex items-center gap-1 text-cyan-400 text-sm hover:text-cyan-300">
+                Browse marketplace <ArrowRight size={12} />
+              </Link>
+            </div>
+          ) : (
+            <div className="divide-y divide-white/5">
+              {purchasedTickets.map(ticket => (
+                <div key={ticket.id} className="flex items-center gap-3 p-4 hover:bg-white/2 transition-colors">
+                  {ticket.image_url ? (
+                    <Link to={`/ticket/${ticket.id}`} className="w-14 h-14 rounded-lg overflow-hidden border border-white/10 flex-shrink-0">
+                      <img src={ticket.image_url} alt="" className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                    </Link>
+                  ) : (
+                    <Link to={`/ticket/${ticket.id}`} className="w-14 h-14 rounded-lg bg-gray-800/50 border border-white/5 flex items-center justify-center flex-shrink-0">
+                      <Ticket size={18} className="text-gray-600" />
+                    </Link>
+                  )}
+                  <Link to={`/ticket/${ticket.id}`} className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-white">{ticket.train_name}</p>
+                      <span className="text-xs bg-cyan-500/10 text-cyan-400 px-2 py-0.5 rounded-full font-semibold flex items-center gap-1">
+                        <ShoppingBag size={9} /> Purchased
+                      </span>
+                    </div>
+                    <p className="text-gray-500 text-xs">{ticket.source} → {ticket.destination}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-gray-600 text-xs flex items-center gap-1">
+                        <Clock size={10} /> {formatDate(ticket.journey_date)}
+                      </p>
+                      {ticket.seat_type && (
+                        <span className="text-xs text-gray-600">{ticket.seat_type}</span>
+                      )}
+                    </div>
+                  </Link>
+                  <div className="text-right flex-shrink-0">
+                    <p className="font-semibold text-sm text-yellow-400">{formatPrice(ticket.price)}</p>
+                    <p className="text-gray-600 text-xs mt-0.5">{formatDate(ticket.updated_at)}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </motion.div>

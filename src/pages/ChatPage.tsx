@@ -134,6 +134,14 @@ export default function ChatPage() {
     if ((!newMessage.trim() && !imageFile) || !selectedUserId || !user) return;
     setSending(true);
 
+    // Ensure the JWT is fresh — a stale/expired token causes RLS to reject the insert
+    const { data: { session: currentSession } } = await supabase.auth.getSession();
+    if (!currentSession) {
+      toast('error', 'Session expired', 'Please sign in again to send messages.');
+      setSending(false);
+      return;
+    }
+
     let imageUrl = '';
     if (imageFile) {
       setUploading(true);

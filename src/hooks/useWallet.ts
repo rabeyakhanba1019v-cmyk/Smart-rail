@@ -79,6 +79,26 @@ export async function addWalletBalance(userId: string, amount: number) {
   return { data, error };
 }
 
+// Refund: adds to balance and corrects total_spent downward (reverses a purchase)
+export async function refundWalletBalance(userId: string, amount: number) {
+  const { data: current, error: fetchError } = await supabase
+    .from('wallets').select('balance, total_spent').eq('user_id', userId).single();
+  if (fetchError || !current) return { data: null, error: fetchError };
+
+  const { data, error } = await supabase
+    .from('wallets')
+    .update({
+      balance: current.balance + amount,
+      total_spent: Math.max(0, current.total_spent - amount),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('user_id', userId)
+    .select()
+    .maybeSingle();
+
+  return { data, error };
+}
+
 export async function rechargeWallet(userId: string, amount: number) {
   const { data: current, error: fetchError } = await supabase
     .from('wallets').select('balance').eq('user_id', userId).single();

@@ -83,10 +83,10 @@ export default function PaymentPage() {
           <div className="bg-gradient-to-br from-emerald-500/20 to-emerald-500/5 border border-emerald-500/20 rounded-xl p-5">
             <div className="flex items-center gap-2 mb-2">
               <TrendingUp size={18} className="text-emerald-400" />
-              <p className="text-gray-400 text-sm">Total Earnings</p>
+              <p className="text-gray-400 text-sm">Total Received</p>
             </div>
             <p className="text-2xl font-bold text-white">{formatPrice(totalReleased)}</p>
-            <p className="text-gray-500 text-xs mt-1">Released to you</p>
+            <p className="text-gray-500 text-xs mt-1">Released to wallet</p>
           </div>
           <div className="bg-gradient-to-br from-yellow-500/20 to-yellow-500/5 border border-yellow-500/20 rounded-xl p-5">
             <div className="flex items-center gap-2 mb-2">
