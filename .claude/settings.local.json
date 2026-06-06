@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node create-admin.js)",
+      "Bash(del \"d:\\\\Local Disk D\\\\proj x\\\\project\\\\create-admin.js\")",
+      "Bash(node check-munni.js)",
+      "Bash(node check-fraud.js)",
+      "Bash(node refund-munni.js)",
+      "Bash(node check-points.js)",
+      "Bash(node fix-points.js)",
+      "PowerShell(Get-ChildItem \"d:\\\\Local Disk D\\\\proj x\\\\project\" -File | Where-Object { $_.Extension -eq \".md\" })",
+      "Bash(npx supabase *)"
+    ]
+  }
+}
